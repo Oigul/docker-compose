@@ -1,0 +1,138 @@
+version: '3.8'
+
+services:
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: spring_crud_postgres_container
+    environment:
+      POSTGRES_DB: users_spring_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: qwerty
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: local_kafka_broker
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REREPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: mailhog
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  external-configuration:
+    build:
+      context: ../external-configuration
+    container_name: external-configuration
+    ports:
+      - "8888:8888"
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8888/gateway/default" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  discovery-server:
+    build:
+      context: ../discovery-server
+    container_name: discovery-server
+    ports:
+      - "8761:8761"
+    depends_on:
+      external-configuration:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8761/" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    environment:
+      SPRING_CONFIG_IMPORT: optional:configserver:http://external-configuration:8888/
+
+  gateway:
+    build:
+      context: ../gateway
+    container_name: gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      external-configuration:
+        condition: service_healthy
+      discovery-server:
+        condition : service_healthy
+    environment:
+      SPRING_CONFIG_IMPORT: optional:configserver:http://external-configuration:8888/
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://discovery-server:8761/eureka/
+
+  user-crud-spring:
+    build:
+      context: ../user-crud-spring
+    container_name: user-crud-spring
+    ports:
+      - "8082:8082"
+    depends_on:
+      external-configuration:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+      postgres-db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    environment:
+      SPRING_CONFIG_IMPORT: optional:configserver:http://external-configuration:8888/
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-db:5432/users_spring_db
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://discovery-server:8761/eureka/
+
+  notification-service:
+    build:
+      context: ../notification-service
+    container_name: notification-service
+    ports:
+      - "8081:8081"
+    depends_on:
+      external-configuration:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      mailhog:
+        condition: service_started
+    environment:
+      SPRING_CONFIG_IMPORT: optional:configserver:http://external-configuration:8888/
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://discovery-server:8761/eureka/
+      SPRING_MAIL_HOST: mailhog
+
+volumes:
+  pgdata:
